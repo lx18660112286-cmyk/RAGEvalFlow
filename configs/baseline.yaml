@@ -1,0 +1,8 @@
+# baseline 实验配置（Mock 模式字段阶段 2 生效，experiments create 直接使用本文件）
+experiment_name: baseline
+rag_version: mock-baseline-v0
+config:
+  client: mock
+  mock_mode: baseline
+  top_k: 3
+  max_retrieval_rounds: 1

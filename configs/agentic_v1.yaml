@@ -1,0 +1,10 @@
+# agentic_v1 实验配置（Mock 模式字段阶段 2 生效，experiments create 直接使用本文件）
+experiment_name: agentic_v1
+rag_version: mock-agentic-v1
+config:
+  client: mock
+  mock_mode: agentic_v1
+  top_k: 5
+  max_retrieval_rounds: 3
+  use_reranker: true
+  use_reflection: true

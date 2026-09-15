@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragevalflow"
+version = "0.1.0"
+description = "RAGEvalFlow：面向 Agentic-RAG 应用的自动评测、失败诊断与优化建议平台（阶段 1 MVP）"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "SQLAlchemy>=2.0",
+    "PyYAML>=6.0",
+    "streamlit>=1.30",
+    "pandas>=2.0",
+]
+
+# 阶段 4 引入 Streamlit、pandas；阶段 2 引入 httpx（真实 RAGClient 预留）。
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["ragevalflow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
