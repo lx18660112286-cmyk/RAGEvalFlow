@@ -176,6 +176,133 @@ config:
   top_k: 5
 ```
 
+## Evaluating a Real Agentic-RAG
+
+本节把真实的 `Dev Knowledge Agent`（包名 `polaris_agentic_rag`）作为被测系统接入 RAGEvalFlow，
+走 **Python Adapter（模式 A/C）**：用被测系统自己的 Python 入口运行一次 Agent，只做纯观测，
+不修改被测系统任何业务逻辑。
+
+### 被测系统的真实形态
+
+- **不是** FastAPI / HTTP API，也没有 `POST /rag/answer`。它是一个自研 Agent Loop 的普通 Python 库。
+- 真实执行入口（`Dev Knowledge Agent/src/polaris_agentic_rag/`）：
+
+  ```python
+  built = build_agent(get_settings(), working_dir=WORKDIR, tracer=tracer)
+  await built.adapter.initialize()
+  result = await built.orchestrator.run(query)   # 单轮 query，无需 history / thread_id
+  await built.adapter.close()
+  ```
+
+- Agent 用 DeepSeek（`deepseek-chat`，环境变量 `DEEPSEEK_API_KEY`）规划与作答，
+  Ollama 本地 bge-m3 做嵌入，检索走 LightRAG（知识库 `examples/knowledge_base/*.md`）。
+- 工具：只有 `search_dev_knowledge`（`rag_search`）。系统**未实现**独立 rerank 节点 / reflection 节点。
+
+### 集成模式与真实来源
+
+`AgenticRAGClient` 通过两个只读观测点采集真实行为（不改变 Agent 决策）：
+
+| 观测点 | 采集内容 | 真实来源 |
+|---|---|---|
+| `SearchRecorder`（包装 `KnowledgeSearchPort`） | 每次真实检索返回的 chunk 正文 / `source_name` | `KnowledgeSearchResult` |
+| `InMemoryTraceSink` → `Tracer` | Agent-LLM 的 token usage（`MODEL_CALL_COMPLETED`） | TraceEvent |
+
+`case.question` 是传给被测系统的唯一输入（其余为 trace 用的 case.id 可选）；任何评测答案
+（`reference_answer` / `expected_docs` / `must_include` / `must_not_include` / `expected_behavior` 等）
+**绝不传入被测系统**（有专项测试守卫）。
+
+### 字段映射（Agentic-RAG → RAGOutput）
+
+| `polaris_agentic_rag` | → | RAGEvalFlow | 说明 |
+|---|---|---|---|
+| `result.answer` | → | `RAGOutput.answer` | 真实最终答案 |
+| `chunk.content` / `chunk.source_name` | → | `RAGOutput.contexts[].text` / `.doc_id` | `doc_id=basename(source_name)`（文档级）；同一 chunk 跨轮去重 |
+| 检索得分 | → | `contexts[].score` | **未实现 → `None`（unavailable）**，不打分 |
+| `len(result.routing_steps)` | → | `trace.retrieval_rounds` | 真实检索执行轮数（≥1） |
+| tool 名（`record.name`） | → | `trace.tools_used` | 真实工具名，如 `search_dev_knowledge` |
+| `record`（每轮 retriever/tool call） | → | `trace.steps` | 真实 tool/round/status/duration |
+| routing.tool_query ≠ 原文 | → | `trace.query_rewrite` | 无独立 rewrite 节点，用“送入检索的真实 query 是否改变”保守推断 |
+| 无 reranker / reflection 节点 | → | `used_reranker / used_reflection = false` | 系统确未实现，非伪造 |
+| `MODEL_CALL_COMPLETED` usage | → | `runtime.input_tokens/output_tokens` | 真实 Agent-LLM token；观测不到 → `None` |
+| 外层 `time.perf_counter()` | → | `runtime.latency_ms` | RAGEvalFlow 真实计时 |
+| `estimated_cost` | → | `runtime.estimated_cost` | 仅 token+model+pricing 齐备才计算，否则 `None`（不伪造成本） |
+
+> `false` = 确认未发生；`None` = 无法观测；二者绝不混同。schema 已做向后兼容的 `Optional` 改造
+> （`Context.score/chunk_id`、`RuntimeInfo.input_tokens/output_tokens/estimated_cost` 允许 `None`），
+> MockRAGClient 历史数据与旧测试保持兼容。
+
+### 指标适用性
+
+| 状态 | 指标 |
+|---|---|
+| SUPPORTED | `latency_ms`、`retrieval_rounds`、`tools_used`/`steps`、`expected_tool_coverage`、`forbidden_tool_rate`、`must_include_coverage`、`forbidden_claim_rate`、`answer_context_overlap_score`、`citation_doc_coverage`、`hit_at_1/3/5`、`mrr`、`expected_doc_coverage`、`context_precision_simple`、`over_retrieval`、`missing_multi_hop` |
+| UNAVAILABLE / 如实 `None` | `input_tokens`、`output_tokens`、`total_tokens`、`estimated_cost`（被测/环境未暴露或未提供定价时） |
+| 如实 `false` | `reranker_used`、`reflection_used`（系统确未实现） |
+
+`over_retrieval` / `expected_tool_coverage` / `forbidden_tool_rate` 依赖数据集 `expected_behavior`：
+当前通信数据集 `datasets/agentic_rag_eval_cases.jsonl` 未声明 rewrite / multi-hop（`should_rewrite/multi_hop=false`），
+`rewrite_used` / `missing_multi_hop` 按规则不会误报为失败。
+
+### 数据集与 doc_id 规范
+
+- 数据集：`datasets/agentic_rag_eval_cases.jsonl`（10 条，与真实知识库同域）。
+- `expected_docs` 采用**文档级稳定标识 = `source_name` 的 basename**（如 `api_auth.md`），
+  与 Adapter 规约后的 `contexts[].doc_id` 一致，避免 chunk→doc 误判。
+- `expected_tools` 用真实工具名 `search_dev_knowledge`（不隐式硬编码映射）。
+
+### 环境准备（被测系统侧，共用一个 venv）
+
+```bash
+# 1) 在被测系统 .venv 中安装 RAGEvalFlow（复用同一 Python 环境）
+& "D:/myself-prove/Dev Knowledge Agent/.venv/Scripts/python.exe" -m pip install -e "D:/myself-prove/RAGEvalFlow"
+
+# 2) 确认 DeepSeek 可用（被测系统读环境变量）
+$env:DEEPSEEK_API_KEY = "sk-..."
+
+# 3) 本地 Ollama 服务运行（bge-m3 嵌入）
+
+# 4) LightRAG 索引：首次用被测系统 CLI 构建
+& "D:/myself-prove/Dev Knowledge Agent/.venv/Scripts/python.exe" scripts/run_agent.py   # 会 ingest examples/knowledge_base
+```
+
+### 执行实验
+
+```bash
+# smoke（3~5 条，只读打印，不写库）
+& "D:/myself-prove/Dev Knowledge Agent/.venv/Scripts/python.exe" scripts/smoke_agentic_rag.py --cases 3
+
+# 待 smoke 契约无误后，跑完整 benchmark（需平台侧 env 同时有 ragevalflow 的 sqlalchemy 等依赖）
+python -m ragevalflow.main init-db
+python -m ragevalflow.main run --config configs/real_agentic_rag.yaml
+python -m ragevalflow.main report --experiment real_agentic_rag_v1 --output reports/real_agentic_rag_v1.md
+```
+
+### 实现与验证
+
+Adapter、Runner 分发、数据集、配置、smoke 脚本与 4 个专项测试均已落地（`pytest` 全绿）；
+真实 10 条 benchmark 已用实际 key/端点跑通（见上节）。
+真实端到端依赖：`DEEPSEEK_API_KEY`(或被测系统 .env) + Ollama(bge-m3) + 预构建 LightRAG 索引 +
+被测系统 .venv 内同时装有 ragevalflow 与 polaris_agentic_rag。
+
+### 已实测联调结果（2026-09-16，真实 key + `code2.rayinai.com/v1` + Ollama bge-m3）
+
+在组合环境（被测系统 .venv 内安装 ragevalflow）下跑通真实 10 条 benchmark
+（`exp_20260916_104752_322f92`）：
+
+| 指标 | 值 | 说明 |
+|---|---|---|
+| `hit_at_3` / `expected_doc_coverage` / `must_include_coverage` | 1.00 / 1.00 / 1.00 | 期望文档与必需事实均命中 |
+| `citation_doc_coverage` | 1.00 | 引用标注落在真实检索文档上 |
+| `context_precision_simple` | 0.26 | 真实系统每轮把整库 4 个文档都纳入上下文 → 单期望文档时精度偏低 |
+| `rewrite_used` | 0.80 | 保守推断：routing.tool_query ≠ 原文（见上文映射） |
+| `latency_ms` 平均 | 22410 | **真实端到端延迟**（LLM 缓存 + 网关 + 检索），远超 3000ms 阈值 |
+| `input/output_tokens` 平均 | 25001 / 2038 | Agent-LLM 真实 usage |
+| `estimated_cost` | unavailable（`None`） | 未提供定价 → 不伪造成本 |
+
+> 失败归因（10×`bad_ranking`=上下文过宽、10×`latency_regression`=真实慢、
+> 4×`forbidden_claim`=答案含 `must_not_include` 子串，多为“不是 X”的否定句式误判）都由真实输出产生，
+> 非伪造。`estimated_cost` 列在报告里显示 `0.0000` 是“缺 key 时平均值回退为 0”的展示问题，含义是 unavailable，不等于零成本。
+
 ## 数据模型（阶段 1）
 
 - **EvalCase**：评价样例（id / category / question / reference_answer / expected_docs / must_include / must_not_include / expected_behavior）

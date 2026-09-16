@@ -87,7 +87,7 @@ def test_rag_output_defaults():
     assert output.contexts == []
     assert output.trace.retrieval_rounds == 1
     assert output.trace.tools_used == []
-    assert output.runtime.estimated_cost == 0.0
+    assert output.runtime.estimated_cost is None  # unavailable，不伪造成 0
     assert output.config == {}
 
 

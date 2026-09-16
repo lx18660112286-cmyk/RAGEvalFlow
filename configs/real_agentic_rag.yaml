@@ -1,0 +1,18 @@
+# 真实 Agentic-RAG（Dev Knowledge Agent / polaris_agentic_rag）评测配置
+# 集成模式：Python Adapter（模式 A/C）—— 用被测系统自己的 .venv 运行，
+# 该环境需同时能 import ragevalflow 与 polaris_agentic_rag（见 README“Evaluating a Real Agentic-RAG”的环境准备）。
+#
+# 说明：
+# - DEEPSEEK_API_KEY 由被测系统从环境变量读取，绝不写在此处 / 不提交 / 不进 case_results.config。
+# - working_dir 指向被测系统的 LightRAG 索引目录（需已构建，见 README 的 prep 步骤）。
+# - 未配置 pricing → runtime.estimated_cost 保持 unavailable（None），不伪造成本。
+experiment_name: real_agentic_rag_v1
+rag_version: polaris-agentic-rag-live
+
+config:
+  client: agentic_rag          # mock 之外的真实被测系统客户端
+  working_dir: "D:/myself-prove/Dev Knowledge Agent/.local/agent_live"
+  model: "deepseek-chat"       # 被测系统 Agent LLM（settings.agent_model）
+  # pricing:                   # 可选：提供后才计算 agent-LLM 部分的 estimated_cost
+  #   input_per_1m_tokens: 1.0
+  #   output_per_1m_tokens: 2.0

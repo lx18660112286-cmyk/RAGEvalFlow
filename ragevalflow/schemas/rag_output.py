@@ -9,12 +9,16 @@ from pydantic import BaseModel, Field
 
 
 class Context(BaseModel):
-    """检索命中的单个上下文片段。"""
+    """检索命中的单个上下文片段。
+
+    真实系统（如 Agentic-RAG）可能不提供 chunk_id / score 等字段：
+    score / chunk_id 允许为 None，以区分"系统确实返回了 0 分"与"未观测到"。
+    """
 
     doc_id: str = Field(description="所属文档 ID")
-    chunk_id: str = Field(description="块 ID")
+    chunk_id: str | None = Field(default=None, description="块 ID（未提供则为 None）")
     text: str = Field(default="", description="上下文文本")
-    score: float = Field(default=0.0, description="检索得分")
+    score: float | None = Field(default=None, description="检索得分（系统未提供则为 None）")
     rank: int = Field(default=0, description="在检索结果中的排序（从 1 开始）")
 
 
@@ -30,12 +34,18 @@ class Trace(BaseModel):
 
 
 class RuntimeInfo(BaseModel):
-    """运行时信息（延迟 / token / 成本）。"""
+    """运行时信息（延迟 / token / 成本）。
+
+    input_tokens / output_tokens / estimated_cost 允许为 None：
+    - tokens 仅在真实 provider 返回 usage 时才填充（Agentic-RAG 只有 Agent-LLM 的 usage；
+      LightRAG 内核的 token 不可观测，故报 None 而非估算）。
+    - estimated_cost 仅在 model 已知 + token 已知 + 提供定价时才计算，否则 None（不伪造成本）。
+    """
 
     latency_ms: float = Field(default=0.0, description="端到端延迟（毫秒）")
-    input_tokens: int = Field(default=0, description="输入 token 数")
-    output_tokens: int = Field(default=0, description="输出 token 数")
-    estimated_cost: float = Field(default=0.0, description="估算成本（元）")
+    input_tokens: int | None = Field(default=None, description="输入 token 数（未观测到则为 None）")
+    output_tokens: int | None = Field(default=None, description="输出 token 数（未观测到则为 None）")
+    estimated_cost: float | None = Field(default=None, description="估算成本（元，未知则为 None）")
 
 
 class RAGOutput(BaseModel):

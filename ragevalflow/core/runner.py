@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ragevalflow.analysis.failure_analyzer import analyze_failures
 from ragevalflow.core.dataset import load_config_yaml, resolve_experiment_name
 from ragevalflow.core.storage import Storage
+from ragevalflow.integrations.agentic_rag_client import AgenticRAGClient
 from ragevalflow.integrations.rag_client import MockRAGClient
 from ragevalflow.metrics import compute_all_metrics
 from ragevalflow.schemas.experiment_result import CaseResult
@@ -79,18 +80,25 @@ def run_experiment(
     rag_version = str(data.get("rag_version") or "")
 
     client_config = data.get("config") or {}
-    mock_mode = str(client_config.get("mock_mode") or "baseline")
-    top_k = int(client_config.get("top_k") or 3)
-
-    client = MockRAGClient(mode=mock_mode, top_k=top_k)
+    client = _build_client(client_config)
 
     # 先在内存中完成全部调用、指标计算与失败归因，实验创建成功前不落任何数据
     computed: list[tuple[str, "RAGOutput", dict[str, float], list]] = []
-    for case in storage.list_cases():
-        output = client.answer(case)
-        metrics = compute_all_metrics(case, output)
-        findings = analyze_failures(case, output, metrics)
-        computed.append((case.id, output, metrics, findings))
+    try:
+        for case in storage.list_cases():
+            output = client.answer(case)
+            metrics = compute_all_metrics(case, output)
+            findings = analyze_failures(case, output, metrics)
+            computed.append((case.id, output, metrics, findings))
+    finally:
+        # 真实客户端持有被测系统/Tracer 生命周期，评测结束务必释放（对 Mock 无副作用）。
+        # 清理失败不掩盖 case 本身抛出的错误。
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - 清理阶段的异常不应覆盖主流程结果
+                pass
 
     # 全部成功后再创建实验并写入结果
     experiment_row = storage.create_experiment(name=name, rag_version=rag_version, config_yaml=config_yaml)
@@ -128,6 +136,27 @@ def _require_ready(storage: Storage) -> None:
         raise RunnerError(
             "数据集中没有评测样例，请先导入数据：python -m ragevalflow.main dataset import <jsonl 文件>"
         )
+
+
+def _build_client(client_config: dict) -> object:
+    """根据实验 config 创建客户端实例。
+
+    - client=mock          -> MockRAGClient（默认，向后兼容）
+    - client=agentic_rag / python -> AgenticRAGClient（真实被测系统，Python Adapter）
+
+    其余字段（working_dir / model / pricing）均为被测系统适配层配置，不进入评测指标。
+    """
+    client_type = str(client_config.get("client") or "mock").lower()
+    if client_type in ("agentic_rag", "python"):
+        return AgenticRAGClient(
+            working_dir=client_config.get("working_dir") or None,
+            model=str(client_config.get("model") or ""),
+            pricing=client_config.get("pricing") or None,
+        )
+    #: mock 模式（默认）
+    mock_mode = str(client_config.get("mock_mode") or "baseline")
+    top_k = int(client_config.get("top_k") or 3)
+    return MockRAGClient(mode=mock_mode, top_k=top_k)
 
 
 def _average_metrics(results: list[CaseResult]) -> dict[str, float]:

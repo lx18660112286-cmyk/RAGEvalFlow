@@ -25,7 +25,9 @@ def test_cost_metrics_values():
 
 
 def test_cost_metrics_defaults():
+    """token / cost 不可观测（None）时，对应指标键不写入，避免把 unavailable 伪装成 0。"""
     case = EvalCase(id="c1", question="q")
     metrics = compute_cost_metrics(case, RAGOutput(question="q", answer="a"))
-    assert metrics["total_tokens"] == 0.0
-    assert metrics["estimated_cost"] == 0.0
+    assert metrics["latency_ms"] == 0.0     # latency 始终写入
+    assert "total_tokens" not in metrics
+    assert "estimated_cost" not in metrics
